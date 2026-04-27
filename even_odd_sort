@@ -1,0 +1,68 @@
+#include <stdio.h>
+#include <curand.h>
+#define N 1024
+
+#define CHECK(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error: %s line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
+
+// Even phase: compare pairs (0,1), (2,3), (4,5)...
+__global__ void evenPhase(float* data, int n) {
+    int idx = 2 * (blockIdx.x * blockDim.x + threadIdx.x);  // even index
+    if (idx + 1 < n && data[idx] > data[idx + 1]) {
+        float tmp = data[idx];
+        data[idx] = data[idx + 1];
+        data[idx + 1] = tmp;
+    }
+}
+
+// Odd phase: compare pairs (1,2), (3,4), (5,6)...
+__global__ void oddPhase(float* data, int n) {
+    int idx = 2 * (blockIdx.x * blockDim.x + threadIdx.x) + 1;  // odd index
+    if (idx + 1 < n && data[idx] > data[idx + 1]) {
+        float tmp = data[idx];
+        data[idx] = data[idx + 1];
+        data[idx + 1] = tmp;
+    }
+}
+
+int main() {
+    float *dData, *data;
+    data = (float*)malloc(N * sizeof(float));
+    CHECK(cudaMalloc(&dData, N * sizeof(float)));
+
+    curandGenerator_t gen;
+    curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+    curandSetPseudoRandomGeneratorSeed(gen, 99ULL);
+    curandGenerateUniform(gen, dData, N);
+    curandDestroyGenerator(gen);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start); cudaEventCreate(&stop);
+
+    int threads = 256;
+    int blocks = (N / 2 + threads - 1) / threads;
+
+    cudaEventRecord(start);
+    for (int i = 0; i < N; i++) {      // N passes guarantees sorted
+        evenPhase<<<blocks, threads>>>(dData, N);
+        oddPhase<<<blocks, threads>>>(dData, N);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float ms;
+    cudaEventElapsedTime(&ms, start, stop);
+    printf("Even-Odd Sort Time: %.3f ms\n", ms);
+
+    CHECK(cudaMemcpy(data, dData, N * sizeof(float), cudaMemcpyDeviceToHost));
+    printf("First 5: %.3f %.3f %.3f %.3f %.3f\n",
+           data[0], data[1], data[2], data[3], data[4]);
+
+    cudaFree(dData); free(data);
+    return 0;
+}
