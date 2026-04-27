@@ -1,0 +1,77 @@
+#include <stdio.h>
+#define N 1024
+#define MASK_DIM 3           // 3x3 convolution mask
+#define TILE 16
+
+#define CHECK(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error: %s line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(1); \
+    } \
+}
+
+// Constant memory — read-only, cached, fast for small data shared by all threads
+__constant__ float cmask[MASK_DIM * MASK_DIM];
+
+__global__ void conv2D(float* input, float* output, int n) {
+    int row = blockIdx.y * TILE + threadIdx.y;
+    int col = blockIdx.x * TILE + threadIdx.x;
+    int halo = MASK_DIM / 2;
+    float sum = 0.0f;
+
+    // For each mask element
+    for (int i = 0; i < MASK_DIM; i++) {
+        for (int j = 0; j < MASK_DIM; j++) {
+            int r = row - halo + i;
+            int c = col - halo + j;
+            // Boundary check — treat out-of-bounds as 0
+            if (r >= 0 && r < n && c >= 0 && c < n)
+                sum += input[r * n + c] * cmask[i * MASK_DIM + j];
+        }
+    }
+
+    if (row < n && col < n)
+        output[row * n + col] = sum;
+}
+
+int main() {
+    float *input, *output, *dIn, *dOut;
+    int size = N * N * sizeof(float);
+
+    input  = (float*)malloc(size);
+    output = (float*)malloc(size);
+    for (int i = 0; i < N*N; i++) input[i] = 1.0f;
+
+    // Simple blur mask (all 1/9)
+    float mask[MASK_DIM * MASK_DIM];
+    for (int i = 0; i < MASK_DIM * MASK_DIM; i++) mask[i] = 1.0f / 9.0f;
+
+    // Copy mask to constant memory — special function
+    cudaMemcpyToSymbol(cmask, mask, MASK_DIM * MASK_DIM * sizeof(float));
+
+    CHECK(cudaMalloc(&dIn,  size));
+    CHECK(cudaMalloc(&dOut, size));
+    CHECK(cudaMemcpy(dIn, input, size, cudaMemcpyHostToDevice));
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start); cudaEventCreate(&stop);
+
+    dim3 block(TILE, TILE);
+    dim3 grid((N + TILE-1)/TILE, (N + TILE-1)/TILE);
+
+    cudaEventRecord(start);
+    conv2D<<<grid, block>>>(dIn, dOut, N);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float ms;
+    cudaEventElapsedTime(&ms, start, stop);
+    printf("2D Conv Time: %.3f ms\n", ms);
+
+    CHECK(cudaMemcpy(output, dOut, size, cudaMemcpyDeviceToHost));
+    printf("output[500*N+500] = %.3f\n", output[500*N+500]);
+
+    cudaFree(dIn); cudaFree(dOut); free(input); free(output);
+    return 0;
+}
